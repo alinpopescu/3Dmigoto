@@ -462,7 +462,7 @@ public:
 				return;
 			}
 			// finish type.
-			if (SkipPacking(c + pos, usedInputRegisters))
+			if (SkipPacking(c + pos, usedInputRegisters) && false) // todo: alin
 				sprintf(format2, "%s%d", format, 4);				// force to float4
 			else
 				if (strlen(mask) > 1)
@@ -554,7 +554,7 @@ public:
 			if (numRead == 6)
 			{
 				// finish type.
-				if (SkipPacking(c + pos, mOutputRegisterType))
+				if (SkipPacking(c + pos, mOutputRegisterType) && false) // todo: alin
 					sprintf(format2, "%s%d", format, 4);				// force to float4
 				else
 					if (strlen(mask) > 1)
@@ -3589,6 +3589,35 @@ public:
 				}
 				break;
 			case SVC_MATRIX_ROWS:
+				switch (var->Rows) {
+					case 4:
+						switch (offset) {
+							case  0: return "_m00"; case  4: return "_m01"; case  8: return "_m02"; case 12: return "_m03";
+							case 16: return "_m10"; case 20: return "_m11"; case 24: return "_m12"; case 28: return "_m13";
+							case 32: return "_m20"; case 36: return "_m21"; case 40: return "_m22"; case 44: return "_m23";
+							case 48: return "_m30"; case 52: return "_m31"; case 56: return "_m32"; case 60: return "_m33";
+						}
+						return "_m??";
+					case 3:
+						switch (offset) {
+							case  0: return "_m00"; case  4: return "_m01"; case  8: return "_m02"; case 12: return "_m03";
+							case 16: return "_m10"; case 20: return "_m11"; case 24: return "_m12"; case 28: return "_m13";
+							case 32: return "_m20"; case 36: return "_m21"; case 40: return "_m22"; case 44: return "_m23";
+						}
+						return "_m??";
+					case 2:
+						switch (offset) {
+							case  0: return "_m00"; case  4: return "_m01"; case  8: return "_m02"; case 12: return "_m03";
+							case 16: return "_m10"; case 20: return "_m11"; case 24: return "_m12"; case 28: return "_m13";
+						}
+						return "_m??";
+					case 1:
+						switch (offset) {
+							case  0: return "_m00"; case  4: return "_m01"; case  8: return "_m02"; case 12: return "_m03";
+						}
+						return "_m0?";
+				}
+			break;
 			case SVC_MATRIX_COLUMNS:
 				switch (var->Rows) {
 					case 4:
@@ -4564,10 +4593,12 @@ public:
 			else if (!strncmp(statement, "dcl_", 4))
 			{
 				// Hateful strcmp logic is upside down, only output for ones we aren't already handling.
-				if (strcmp(statement, "dcl_output") && 
+				if (strcmp(statement, "dcl_resource_raw") && 
+					strcmp(statement, "dcl_output") && 
 					strcmp(statement, "dcl_output_siv") &&
 					strcmp(statement, "dcl_globalFlags") &&
-					//strcmp(statement, "dcl_input_siv") && 
+					strcmp(statement, "dcl_input_siv") && 
+					strcmp(statement, "dcl_input_sgv") && 
 					strcmp(statement, "dcl_input_ps") && 
 					strcmp(statement, "dcl_input_ps_sgv") &&
 					strcmp(statement, "dcl_input_ps_siv"))
@@ -6348,6 +6379,73 @@ public:
 						parse_ld_structured(shader, c, pos, size, instr);
 						break;
 					}
+
+					case OPCODE_LD_RAW:
+					{
+						string dst0, srcAddress, src0;
+						string swiz;
+
+						string tname(op3, strchr(op3, '.'));
+						uint32_t tui = atoi(tname.data() + 1);
+						ResourceBinding* bindings = nullptr;
+						for (uint32_t i = 0; i < shader->sInfo->ui32NumResourceBindings; i++)
+						{
+							if (shader->sInfo->psResourceBindings[i].ui32BindPoint == tui)
+							{
+								bindings = &shader->sInfo->psResourceBindings[i];
+								break;
+							}
+						}
+
+						if (bindings == NULL)
+						{
+							sprintf(buffer, "// Missing reflection info for shader. No names possible.\n");
+							appendOutput(buffer);
+							src0 = "no_RawBufferName";
+							srcAddress = "no_srcAddressRegister";
+						}
+						else
+						{
+							src0 = bindings->Name;
+							srcAddress = string(op2, strlen(op2) - 1);
+						}
+						dst0 = "r" + std::to_string(instr->asOperands[0].ui32RegisterNumber);
+
+						uint32_t offset = 0;
+						char* op3_swiz = strchr(op3, '.') + 1;
+						uint32_t op3_idx = 0;
+
+						// Output one line for each swizzle in dst0.xyzw that is active.
+						for (int component = 0; component < 4; component++)
+						{
+							if (instr->asOperands[0].ui32CompMask & (1 << component))
+							{
+								switch (component)
+								{
+									case 3: swiz = "w"; break;
+									case 2: swiz = "z"; break;
+									case 1: swiz = "y"; break;
+									case 0:
+									default: swiz = "x"; break;
+								}
+
+								switch (op3_swiz[op3_idx++])
+								{
+									case 'x': offset = 0; break;
+									case 'y': offset = 1; break;
+									case 'z': offset = 2; break;
+									case 'w': offset = 3; break;
+									default: offset = 0; break;
+								}
+								sprintf(buffer, "  %s.%s = %s.Load(%s*4+%d*4);\n",
+									dst0.c_str(), swiz.c_str(), src0.c_str(), srcAddress.c_str(), offset);
+								appendOutput(buffer);
+							}
+						}
+						removeBoolean(op2);
+						break;
+					}
+
 						//	  gInstanceBuffer[worldMatrixOffset] = x.y;
 					case OPCODE_STORE_STRUCTURED:
 					{
@@ -6360,7 +6458,6 @@ public:
 						// this is completed.
 					case OPCODE_STORE_UAV_TYPED:
 					case OPCODE_LD_UAV_TYPED:
-					case OPCODE_LD_RAW:
 					case OPCODE_STORE_RAW:
 					{
 						sprintf(buffer, "// No code for instruction (needs manual fix):\n");
@@ -6732,7 +6829,7 @@ public:
 		// variants for different swizzle sizes, like .xy or .xyz.
 
 		declaration +=
-			"#define cmp -\n";
+			"#define cmp\n";
 
 		if (G->IniParamsReg >= 0) {
 			declaration +=
